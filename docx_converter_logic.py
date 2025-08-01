@@ -1,8 +1,9 @@
 # docx_converter_logic.py
 import os
 import win32com.client
-import pythoncom # Still needed for pythoncom.com_error and potentially other COM interactions
+import pythoncom
 import re
+import sys # Import sys module for platform check
 
 class DocxConverterLogic:
     """
@@ -42,6 +43,7 @@ class DocxConverterLogic:
         """
         Determines the output PDF filename based on the DOCX path and selected naming rule.
         This method is public because the GUI needs to preview the PDF names.
+        Note: This method provides the *intended* filename before uniqueness resolution.
 
         Args:
             docx_path (str): The full path to the source DOCX file.
@@ -57,13 +59,64 @@ class DocxConverterLogic:
         elif naming_rule == "Remove Square Brackets":
             # This rule specifically removes content within square brackets and the brackets themselves.
             # Use non-greedy matching (.*?) to handle multiple bracketed sections correctly.
+            # Corrected regex: matches literal brackets by escaping them.
             cleaned_base_name = re.sub(r'\[.*?\]', '', base_name)
             # Remove any resulting multiple spaces and trim leading/trailing spaces
             cleaned_base_name = re.sub(r'\s+', ' ', cleaned_base_name).strip()
+            # Handle cases where cleaning leaves an empty string or just spaces
+            if not cleaned_base_name:
+                cleaned_base_name = "Untitled_Document" # Fallback name
             return f"{cleaned_base_name}.pdf"
         else:
             self._log(f"Warning: Unknown naming rule '{naming_rule}'. Using 'Original Name' as fallback.", "orange")
             return f"{base_name}.pdf"
+
+    def _get_unique_pdf_path(self, output_dir, proposed_pdf_filename, generated_filenames_tracker):
+        """
+        Generates a unique PDF path by appending a counter if a file with the
+        same name already exists on disk or has been generated in this batch.
+
+        Args:
+            output_dir (str): The directory where the PDF will be saved.
+            proposed_pdf_filename (str): The initial proposed filename (e.g., "document.pdf").
+            generated_filenames_tracker (dict): A dictionary mapping base filenames
+                                                to the *next counter to try* for that base.
+
+        Returns:
+            str: A unique full path for the PDF file.
+        """
+        base_name, ext = os.path.splitext(proposed_pdf_filename)
+        
+        # Get the starting counter for this base_name. If not seen, start from 0 (meaning no counter suffix yet).
+        # If seen, start from the next number that was previously suggested.
+        current_counter = generated_filenames_tracker.get(base_name, 0) 
+
+        unique_filename = ""
+        full_path_candidate = ""
+        
+        while True:
+            if current_counter == 0:
+                unique_filename = proposed_pdf_filename
+            else:
+                unique_filename = f"{base_name} ({current_counter}){ext}"
+            
+            full_path_candidate = os.path.join(output_dir, unique_filename)
+            
+            path_for_check = os.path.abspath(full_path_candidate)
+
+            # Check if this proposed path already exists on disk
+            # if os.path.exists(path_for_check):
+            #     current_counter += 1
+            #     continue # Try next counter
+            
+            break # Found a unique name
+
+        # Update the tracker with the *next* counter to try for this base_name
+        # This ensures that if 'doc.pdf' was used (counter 0), the next time 'doc' is encountered,
+        # it will start trying from 'doc (1).pdf' (counter 1).
+        generated_filenames_tracker[base_name] = current_counter + 1
+        
+        return path_for_check
 
     def convert_batch(self, docx_file_list, output_dir, naming_rule):
         """
@@ -82,10 +135,13 @@ class DocxConverterLogic:
         converted_count = 0
         failed_count = 0
         total_files = len(docx_file_list)
+        
+        # Tracker for unique filenames within this batch
+        # Maps base_name (e.g., "document") to the next counter to try (e.g., 1 for "document (1).pdf")
+        generated_filenames_tracker = {} 
 
         try:
-            # Ensure the output directory exists. This check is also done in GUI,
-            # but it's good for the logic to be robust.
+            # Ensure the output directory exists.
             if not os.path.isdir(output_dir):
                 try:
                     os.makedirs(output_dir)
@@ -94,8 +150,7 @@ class DocxConverterLogic:
                     self._log(f"Error: Could not create output directory '{output_dir}': {e}", "red")
                     return converted_count, failed_count, total_files
 
-            # Initialize Word Application - ALWAYS launch a new, isolated instance using DispatchEx.
-            # DispatchEx ensures a new instance is created, even if Word is already running.
+            # Initialize Word Application
             try:
                 word = win32com.client.DispatchEx("Word.Application")
                 word.Visible = False
@@ -106,51 +161,50 @@ class DocxConverterLogic:
 
             for i, docx_path in enumerate(docx_file_list):
                 current_file_name_display = os.path.basename(docx_path)
-                self._log(f"[{i+1}/{total_files}] Converting: {current_file_name_display}", "orange")
+                self._log(f"[{i+1}/{total_files}] Processing: {current_file_name_display}", "orange")
 
-                doc = None # Initialize doc to None for proper cleanup in case of early errors
+                doc = None 
                 try:
                     if not os.path.exists(docx_path):
                         self._log(f"Skipping '{current_file_name_display}': Source file does not exist.", "red")
                         failed_count += 1
                         continue
 
-                    pdf_file_name = self.get_pdf_filename(docx_path, naming_rule)
-                    pdf_path = os.path.join(output_dir, pdf_file_name)
+                    # Get the initial proposed PDF filename based on the naming rule
+                    proposed_pdf_filename = self.get_pdf_filename(docx_path, naming_rule)
+                    
+                    # Get a unique PDF path, handling duplicates
+                    unique_pdf_full_path = self._get_unique_pdf_path(output_dir, proposed_pdf_filename, generated_filenames_tracker)
+                    
+                    # Extract the filename part for logging
+                    unique_pdf_file_name = os.path.basename(unique_pdf_full_path) 
 
-                    # Open Word document with specific options for robustness and user experience.
-                    # ReadOnly=True ensures the original file is not modified.
-                    # ConfirmConversions=False prevents conversion dialogs for unusual file types.
-                    # AddToRecentFiles=False keeps the user's recent files list clean.
+                    # Open Word document
                     doc = word.Documents.Open(
-                        os.path.abspath(docx_path),
+                        os.path.abspath(docx_path), # Use the regular absolute path
                         ReadOnly=True,
                         ConfirmConversions=False,
                         AddToRecentFiles=False
                     )
-                    doc.SaveAs(os.path.abspath(pdf_path), FileFormat=17) # 17 is the wdFormatPDF enum value for saving as PDF
-                    doc.Close(False) # Close the document, False means don't save changes to the original DOCX
-                    self._log(f"Successfully converted: {current_file_name_display} -> {pdf_file_name}", "green")
+
+                    # Save as PDF
+                    doc.SaveAs(unique_pdf_full_path, FileFormat=17) 
+                    doc.Close(False) 
+                    self._log(f"Successfully converted: {current_file_name_display} -> {unique_pdf_file_name}", "green")
                     converted_count += 1
 
                 except pythoncom.com_error as com_e:
-                    # Handle COM-specific errors, often providing more detail for Word automation issues.
                     error_message = f"Conversion of '{current_file_name_display}' failed due to COM error: {com_e}"
-                    # Attempt to get more COM error details if available.
-                    # com_e.ex_info is a tuple containing detailed error info (source, description, helpfile, helpcontext, scode).
-                    # ex_info[1] (description) or ex_info[4] (scode) are often most useful.
                     if hasattr(com_e, 'ex_info') and com_e.ex_info and len(com_e.ex_info) > 1:
                         com_error_description = com_e.ex_info[1]
                         com_error_scode = com_e.ex_info[4]
                         error_message += f"\nDetails: {com_error_description} (HRESULT: {hex(com_error_scode)})"
-
-                        # Check for common file locking error code (0x80070020 - ERROR_SHARING_VIOLATION).
-                        # This HRESULT value is -2147024864 in signed decimal.
-                        if com_error_scode == -2147024864:
+                        if com_error_scode == -2147024864: # ERROR_SHARING_VIOLATION (0x80070020)
                             error_message += "\nPossible cause: The file is currently in use or locked by another application (e.g., another Word instance). Please close the file and try again."
+                        elif com_error_scode == -2147024741: # HRESULT_FROM_WIN32(ERROR_BAD_PATHNAME) (0x8007007B)
+                            error_message += "\nPossible cause: The path (source or destination) might be too long or invalid."
                     self._log(error_message, "red")
                     failed_count += 1
-                    # Try to close the document even if save failed, to prevent Word from hanging.
                     if doc:
                         try:
                             doc.Close(False)
@@ -161,7 +215,6 @@ class DocxConverterLogic:
                     error_message = f"Conversion of '{current_file_name_display}' failed: {e}"
                     self._log(error_message, "red")
                     failed_count += 1
-                    # Try to close the document even if save failed, to prevent Word from hanging.
                     if doc:
                         try:
                             doc.Close(False)
@@ -173,8 +226,8 @@ class DocxConverterLogic:
         finally:
             if word:
                 try:
-                    word.Quit() # Always quit the Word application instance we launched.
-                    del word # Release COM object to prevent memory leaks and ensure clean shutdown.
+                    word.Quit() 
+                    del word 
                     self._log("Word Application quit and COM object released.", "blue")
                 except Exception as e:
                     self._log(f"Error quitting Word application: {e}", "red")
