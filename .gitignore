@@ -2,3 +2,4 @@
 /[Bb]uild
 /[Dd]ist
 /__pycache__
+/.test*

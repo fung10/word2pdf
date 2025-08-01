@@ -43,17 +43,7 @@ jobs:
 
     - name: Run PyInstaller
       run: |
-        $main_script = "main_app_gui.py"
-        $exe_name = "DOCX2PDFConverter"
-        $icon_path = ""
-
-        $pyinstaller_cmd = "pyinstaller --onefile --windowed --clean --name '$exe_name' '$main_script'"
-
-        if ("$icon_path" -ne "") {
-            $pyinstaller_cmd += " --icon '$icon_path'"
-        }
-
-        Invoke-Expression $pyinstaller_cmd
+        pyinstaller --clean main_app_gui.spec
 
     - name: List dist directory content (for debugging)
       run: dir dist

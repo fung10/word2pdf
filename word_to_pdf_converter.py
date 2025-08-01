@@ -1,4 +1,4 @@
-# docx_converter_logic.py
+# word_to_pdf_converter.py
 import os
 import win32com.client
 import pythoncom

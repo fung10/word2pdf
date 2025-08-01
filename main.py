@@ -1,4 +1,4 @@
-# main_app_gui.py
+# main.py
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext
 from tkinter import ttk # Import ttk module for Treeview
@@ -6,7 +6,7 @@ import os
 import threading
 
 # Import the logic module
-from docx_converter_logic import DocxConverterLogic
+from word_to_pdf_converter import DocxConverterLogic
 
 class DocxToPdfConverterApp:
     """
