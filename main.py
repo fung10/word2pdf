@@ -465,19 +465,27 @@ class WordToPdfConverterApp:
 
         # Populate the Treeview with results
         for item in results:
-            original_file = os.path.basename(item.get("input_path", "N/A"))
-            converted_pdf = os.path.basename(item.get("output_path", "N/A")) if item.get("output_path") else "N/A"
+            original_file = os.path.basename(item.get("original_filename", "N/A"))
+            converted_pdf = os.path.basename(item.get("output_filename", "N/A"))
             status = item.get("status", "Unknown")
             message = item.get("message", "")
+            renamed = item.get("renamed_due_to_collision", False)
 
             # You can add tags for coloring based on status if desired
-            tag = "green" if status == "Success" else "red" if status == "Failed" else "blue"
+            if renamed:
+                tag = "blue"
+            elif status == "Success":
+                tag = "green"
+            elif status == "Failed":
+                tag = "red"
+            else:
+                tag = ""
             summary_tree.insert("", "end", values=(original_file, converted_pdf, status, message), tags=(tag,))
         
         # Apply tags for coloring
         summary_tree.tag_configure("green", foreground="green")
         summary_tree.tag_configure("red", foreground="red")
-        summary_tree.tag_configure("blue", foreground="blue") # For "Unknown" or other statuses
+        summary_tree.tag_configure("blue", foreground="blue")
 
         # Add a close button
         close_button = tk.Button(summary_window, text="Close", command=summary_window.destroy)

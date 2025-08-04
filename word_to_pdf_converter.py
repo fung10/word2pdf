@@ -196,6 +196,18 @@ class ConversionWorker(threading.Thread):
                         
                         final_pdf_filename = os.path.basename(final_pdf_full_path)
 
+                        if len(final_pdf_full_path) > 255:
+                            error_msg = (
+                                f"Output PDF path is too long ({len(final_pdf_full_path)} characters). "
+                                f"Windows path limit is typically 255-260 characters. "
+                                f"Please shorten the output directory path or the original filename: '{final_pdf_full_path}'"
+                            )
+                            self._log(error_msg, "red")
+                            result["output_filename"] = final_pdf_filename
+                            result["message"] = "Path exceeds 255 chars. Shorten."
+                            # This task will be marked as failed in the finally block
+                            continue # Skip to next task
+
                         self._log(f"Processing '{original_filename}' -> '{final_pdf_filename}'", "orange")
 
                         # Open Word document
