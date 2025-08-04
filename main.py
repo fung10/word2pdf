@@ -465,8 +465,8 @@ class WordToPdfConverterApp:
 
         # Populate the Treeview with results
         for item in results:
-            original_file = os.path.basename(item.get("original_filename", "N/A"))
-            converted_pdf = os.path.basename(item.get("output_filename", "N/A"))
+            original_file = item.get("original_filename", "N/A")
+            converted_pdf = item.get("output_filename", "N/A")
             status = item.get("status", "Unknown")
             message = item.get("message", "")
             renamed = item.get("renamed_due_to_collision", False)
