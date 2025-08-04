@@ -493,6 +493,4 @@ class BatchConverter:
 
         self._log(f"Batch conversion complete. Converted: {converted_count}, Failed: {failed_count}, Total: {total_files}", "blue")
 
-        print(final_results)
-
         return final_results, converted_count, failed_count, total_files

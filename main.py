@@ -407,7 +407,84 @@ class WordToPdfConverterApp:
             f"Total: {total_files} file(s)"
         )
         self.log_status(final_message, "blue")
-        messagebox.showinfo("Batch Conversion Complete", final_message)
+        # messagebox.showinfo("Batch Conversion Complete", final_message)
+
+        # --- NEW: Show detailed results in a new window ---
+        if final_results: # Only show if there are results to display
+            self._show_conversion_summary_window(final_results)
+        # --- END NEW ---
+
+    def _show_conversion_summary_window(self, results):
+        """
+        Creates a new Toplevel window to display the detailed conversion results
+        in a Treeview.
+        """
+        summary_window = tk.Toplevel(self.master)
+        summary_window.title("Conversion Summary")
+        summary_window.geometry("800x400")
+        summary_window.transient(self.master) # Make it appear on top of the main window
+        summary_window.grab_set() # Make it modal (user must interact with it before main window)
+
+        # Configure grid for the summary window
+        summary_window.grid_rowconfigure(0, weight=1)
+        summary_window.grid_columnconfigure(0, weight=1)
+
+        # Frame for the Treeview and scrollbars
+        tree_frame = tk.Frame(summary_window)
+        tree_frame.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
+        tree_frame.grid_rowconfigure(0, weight=1)
+        tree_frame.grid_columnconfigure(0, weight=1)
+
+        # Create the Treeview
+        summary_tree = ttk.Treeview(tree_frame,
+                                    columns=("original_file", "converted_pdf", "status", "message"),
+                                    show="headings")
+
+        # Define headings
+        summary_tree.heading("original_file", text="Original File", anchor="w")
+        summary_tree.heading("converted_pdf", text="Converted PDF", anchor="w")
+        summary_tree.heading("status", text="Status", anchor="center")
+        summary_tree.heading("message", text="Message", anchor="w")
+
+        # Define column widths (adjust as needed)
+        summary_tree.column("original_file", width=200, minwidth=150, stretch=True)
+        summary_tree.column("converted_pdf", width=200, minwidth=150, stretch=True)
+        summary_tree.column("status", width=80, minwidth=60, stretch=False)
+        summary_tree.column("message", width=250, minwidth=100, stretch=True)
+
+        summary_tree.grid(row=0, column=0, sticky="nsew")
+
+        # Add scrollbars
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=summary_tree.yview)
+        vsb.grid(row=0, column=1, sticky="ns")
+        summary_tree.configure(yscrollcommand=vsb.set)
+
+        hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=summary_tree.xview)
+        hsb.grid(row=1, column=0, sticky="ew")
+        summary_tree.configure(xscrollcommand=hsb.set)
+
+        # Populate the Treeview with results
+        for item in results:
+            original_file = os.path.basename(item.get("input_path", "N/A"))
+            converted_pdf = os.path.basename(item.get("output_path", "N/A")) if item.get("output_path") else "N/A"
+            status = item.get("status", "Unknown")
+            message = item.get("message", "")
+
+            # You can add tags for coloring based on status if desired
+            tag = "green" if status == "Success" else "red" if status == "Failed" else "blue"
+            summary_tree.insert("", "end", values=(original_file, converted_pdf, status, message), tags=(tag,))
+        
+        # Apply tags for coloring
+        summary_tree.tag_configure("green", foreground="green")
+        summary_tree.tag_configure("red", foreground="red")
+        summary_tree.tag_configure("blue", foreground="blue") # For "Unknown" or other statuses
+
+        # Add a close button
+        close_button = tk.Button(summary_window, text="Close", command=summary_window.destroy)
+        close_button.grid(row=1, column=0, pady=10)
+
+        # Set focus to the summary window and wait until it's closed
+        summary_window.wait_window()
 
 
 if __name__ == "__main__":
