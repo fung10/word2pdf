@@ -62,7 +62,7 @@ class WordConverterLogic:
             # This rule specifically removes content within square brackets and the brackets themselves.
             # Use non-greedy matching (.*?) to handle multiple bracketed sections correctly.
             # Corrected regex: matches literal brackets by escaping them.
-            cleaned_base_name = re.sub(r'[.*?]', '', base_name)
+            cleaned_base_name = re.sub(r'\[.*?\]', '', base_name)
             # Remove any resulting multiple spaces and trim leading/trailing spaces
             cleaned_base_name = re.sub(r'\s+', ' ', cleaned_base_name).strip()
             # Handle cases where cleaning leaves an empty string or just spaces
@@ -77,7 +77,7 @@ class ConversionWorker(threading.Thread):
     """
     A worker thread that converts WORD files to PDF using its own Word Application instance.
     """
-    def __init__(self, worker_id, task_queue, results_dict, shared_tracker, tracker_lock, output_dir, naming_rule, log_callback):
+    def __init__(self, worker_id, task_queue, results_dict, shared_tracker, tracker_lock, output_dir, naming_rule, log_callback, stop_event):
         super().__init__()
         self.worker_id = worker_id
         self.task_queue = task_queue
@@ -87,6 +87,7 @@ class ConversionWorker(threading.Thread):
         self.output_dir = output_dir
         self.naming_rule = naming_rule
         self.log_callback = log_callback
+        self.stop_event = stop_event # Event to signal stopping
         self.word_app = None
         self.logic = WordConverterLogic(log_callback=self._log) # Each worker gets its own logic instance for logging
 
@@ -115,132 +116,156 @@ class ConversionWorker(threading.Thread):
         # Initialize COM for this thread
         pythoncom.CoInitialize() 
         self._log("Starting worker.", "blue")
-        while True:
-            try:
-                # Get a task from the queue with a timeout.
-                # If queue is empty for 1 second, it raises queue.Empty, and the worker exits.
-                task = self.task_queue.get(timeout=0.1) 
-            except queue.Empty:
-                self._log("Queue is empty, no more tasks. Exiting worker.", "blue")
-                break # Exit loop if queue is empty
+        try:
+            while True:
+                # Check stop event first. If set and queue is empty, exit.
+                if self.stop_event.is_set():
+                    self._log("Stop signal received. Exiting worker.", "blue")
+                    break
 
-            original_index = task["original_index"]
-            word_path = task["word_path"]
-            original_filename = os.path.basename(word_path)
-            
-            # Initialize result structure for this file
-            result = {
-                "original_index": original_index,
-                "original_filename": original_filename,
-                "input_path": word_path,
-                "output_filename": None,
-                "output_path": None,
-                "status": "Failed",
-                "message": "",
-                "renamed_due_to_collision": False
-            }
-
-            try:
-                # Initialize Word Application for this worker if not already done
-                if self.word_app is None:
-                    try:
-                        self.word_app = win32com.client.DispatchEx("Word.Application")
-                        self.word_app.Visible = False
-                        self._log("Launched a new, isolated Word Application instance.", "blue")
-                    except Exception as e:
-                        error_msg = f"Could not launch Word Application instance. Please ensure MS Word is installed and not corrupted. Details: {e}"
-                        self._log(error_msg, "red")
-                        result["message"] = error_msg
-                        # Store result and mark task done before continuing to next task
-                        with self.tracker_lock:
-                            self.results_dict[original_index] = result
-                        continue # Skip to next task if Word app couldn't be launched
-
-                doc = None # Initialize doc object to None
+                task = None
                 try:
-                    if not os.path.exists(word_path):
-                        error_msg = f"Source file does not exist: '{original_filename}'"
-                        self._log(error_msg, "red")
-                        result["message"] = error_msg
-                        raise FileNotFoundError(error_msg)
+                    # Get a task from the queue with a short timeout.
+                    # This timeout allows the worker to check the stop_event periodically.
+                    task = self.task_queue.get(timeout=0.1) 
+                except queue.Empty:
+                    self._log("Queue is empty, no more tasks. Exiting worker.", "blue")
+                    break # Exit loop if queue is empty
 
-                    # Determine proposed PDF filename based on naming rule
-                    proposed_pdf_filename = self.logic.get_pdf_filename(word_path, self.naming_rule)
-                    
-                    # Get a unique PDF path, handling duplicates with a shared tracker and lock
-                    final_pdf_full_path, renamed = self._get_unique_pdf_path_thread_safe(
-                        self.output_dir, proposed_pdf_filename, self.shared_tracker, self.tracker_lock
-                    )
-                    
-                    final_pdf_filename = os.path.basename(final_pdf_full_path)
+                original_index = task["original_index"]
+                word_path = task["word_path"]
+                original_filename = os.path.basename(word_path)
+                
+                # Initialize result structure for this file
+                result = {
+                    "original_index": original_index,
+                    "original_filename": original_filename,
+                    "input_path": word_path,
+                    "output_filename": None,
+                    "output_path": None,
+                    "status": "Failed",
+                    "message": "",
+                    "renamed_due_to_collision": False
+                }
 
-                    self._log(f"Processing '{original_filename}' -> '{final_pdf_filename}'", "orange")
 
-                    # Open Word document
-                    doc = self.word_app.Documents.Open(
-                        os.path.abspath(word_path), # Use the regular absolute path
-                        ReadOnly=True,
-                        ConfirmConversions=False,
-                        AddToRecentFiles=False
-                    )
+                try:
+                    # If stop signal is received *after* getting a task, mark it as failed immediately
+                    if self.stop_event.is_set():
+                        self._log(f"Stop signal received, marking '{original_filename}' as failed (conversion stopped).", "orange")
+                        result["message"] = "Conversion stopped by user."
+                        continue # Get next task or exit if queue empty/stop signal still active
 
-                    # Save as PDF
-                    doc.SaveAs(final_pdf_full_path, FileFormat=17) # 17 is wdFormatPDF
-                    doc.Close(False) # Close without saving changes to the original WORD
-                    
-                    result["status"] = "Success"
-                    result["output_filename"] = final_pdf_filename
-                    result["output_path"] = final_pdf_full_path
-                    result["renamed_due_to_collision"] = renamed
-                    result["message"] = "Successfully converted." + (" (Renamed due to collision)" if renamed else "")
-                    self._log(f"Successfully converted: '{original_filename}' -> '{final_pdf_filename}'", "green")
-
-                except pythoncom.com_error as com_e:
-                    error_message = f"Conversion of '{original_filename}' failed due to COM error: {com_e}"
-                    if hasattr(com_e, 'ex_info') and com_e.ex_info and len(com_e.ex_info) > 1:
-                        com_error_description = com_e.ex_info[1]
-                        com_error_scode = com_e.ex_info[4]
-                        error_message += f"\nDetails: {com_error_description} (HRESULT: {hex(com_error_scode)})"
-                        if com_error_scode == -2147024864: # ERROR_SHARING_VIOLATION (0x80070020)
-                            error_message += "\nPossible cause: The file is currently in use or locked by another application (e.g., another Word instance). Please close the file and try again."
-                        elif com_error_scode == -2147024741: # HRESULT_FROM_WIN32(ERROR_BAD_PATHNAME) (0x8007007B)
-                            error_message += "\nPossible cause: The path (source or destination) might be too long or invalid."
-                    self._log(error_message, "red")
-                    result["message"] = error_message
-                    if doc: # Try to close document even if conversion failed
+                    # Initialize Word Application for this worker if not already done
+                    if self.word_app is None:
                         try:
-                            doc.Close(False)
-                        except Exception as close_e:
-                            self._log(f"Error closing document after failed COM conversion: {close_e}", "red")
+                            self.word_app = win32com.client.DispatchEx("Word.Application")
+                            self.word_app.Visible = False
+                            self._log("Launched a new, isolated Word Application instance.", "blue")
+                        except Exception as e:
+                            error_msg = f"Could not launch Word Application instance. Please ensure MS Word is installed and not corrupted. Details: {e}"
+                            self._log(error_msg, "red")
+                            result["message"] = error_msg
+                            # Store result and mark task done before continuing to next task
+                            with self.tracker_lock:
+                                self.results_dict[original_index] = result
+                            # self.task_queue.task_done() # Mark task done even on app launch failure
+                            continue # Skip to next task if Word app couldn't be launched
+                    
+                    # If stop signal is received *after* getting a task, mark it as failed immediately
+                    if self.stop_event.is_set():
+                        self._log(f"Stop signal received, marking '{original_filename}' as failed (conversion stopped).", "orange")
+                        result["message"] = "Conversion stopped by user."
+                        continue # Get next task or exit if queue empty/stop signal still active
 
+                    doc = None # Initialize doc object to None
+                    try:
+                        if not os.path.exists(word_path):
+                            error_msg = f"Source file does not exist: '{original_filename}'"
+                            self._log(error_msg, "red")
+                            result["message"] = error_msg
+                            raise FileNotFoundError(error_msg)
+
+                        # Determine proposed PDF filename based on naming rule
+                        proposed_pdf_filename = self.logic.get_pdf_filename(word_path, self.naming_rule)
+                        
+                        # Get a unique PDF path, handling duplicates with a shared tracker and lock
+                        final_pdf_full_path, renamed = self._get_unique_pdf_path_thread_safe(
+                            self.output_dir, proposed_pdf_filename, self.shared_tracker, self.tracker_lock
+                        )
+                        
+                        final_pdf_filename = os.path.basename(final_pdf_full_path)
+
+                        self._log(f"Processing '{original_filename}' -> '{final_pdf_filename}'", "orange")
+
+                        # Open Word document
+                        doc = self.word_app.Documents.Open(
+                            os.path.abspath(word_path), # Use the regular absolute path
+                            ReadOnly=True,
+                            ConfirmConversions=False,
+                            AddToRecentFiles=False
+                        )
+
+                        # Save as PDF
+                        doc.SaveAs(final_pdf_full_path, FileFormat=17) # 17 is wdFormatPDF
+                        doc.Close(False) # Close without saving changes to the original WORD
+                        doc = None
+                        
+                        result["status"] = "Success"
+                        result["output_filename"] = final_pdf_filename
+                        result["output_path"] = final_pdf_full_path
+                        result["renamed_due_to_collision"] = renamed
+                        result["message"] = "Successfully converted." + (" (Renamed due to collision)" if renamed else "")
+                        self._log(f"Successfully converted: '{original_filename}' -> '{final_pdf_filename}'", "green")
+
+                    except pythoncom.com_error as com_e:
+                        error_message = f"Conversion of '{original_filename}' failed due to COM error: {com_e}"
+                        if hasattr(com_e, 'ex_info') and com_e.ex_info and len(com_e.ex_info) > 1:
+                            com_error_description = com_e.ex_info[1]
+                            com_error_scode = com_e.ex_info[4]
+                            error_message += f"\nDetails: {com_error_description} (HRESULT: {hex(com_error_scode)})"
+                            if com_error_scode == -2147024864: # ERROR_SHARING_VIOLATION (0x80070020)
+                                error_message += "\nPossible cause: The file is currently in use or locked by another application (e.g., another Word instance). Please close the file and try again."
+                            elif com_error_scode == -2147024741: # HRESULT_FROM_WIN32(ERROR_BAD_PATHNAME) (0x8007007B)
+                                error_message += "\nPossible cause: The path (source or destination) might be too long or invalid."
+                        self._log(error_message, "red")
+                        result["message"] = error_message
+                        if doc: # Try to close document even if conversion failed
+                            try:
+                                doc.Close(False)
+                            except Exception as close_e:
+                                self._log(f"Error closing document after failed COM conversion: {close_e}", "red")
+
+                    except Exception as e:
+                        error_message = f"Conversion of '{original_filename}' failed: {e}"
+                        self._log(error_message, "red")
+                        result["message"] = error_message
+                        if doc: # Try to close document even if conversion failed
+                            try:
+                                doc.Close(False)
+                            except Exception as close_e:
+                                self._log(f"Error closing document after failed general conversion: {close_e}", "red")
+
+                finally:
+                    # Store result in the shared dictionary, protected by the lock
+                    with self.tracker_lock:
+                        self.results_dict[original_index] = result
+                    # Mark the task as done in the queue
+                    self.task_queue.task_done()
+
+        finally:
+            # Clean up Word application when worker exits its loop
+            if self.word_app:
+                try:
+                    self.word_app.Quit() 
+                    del self.word_app 
+                    self._log("Word Application quit and COM object released.", "blue")
                 except Exception as e:
-                    error_message = f"Conversion of '{original_filename}' failed: {e}"
-                    self._log(error_message, "red")
-                    result["message"] = error_message
-                    if doc: # Try to close document even if conversion failed
-                        try:
-                            doc.Close(False)
-                        except Exception as close_e:
-                            self._log(f"Error closing document after failed general conversion: {close_e}", "red")
+                    self._log(f"Error quitting Word application: {e}", "red")
+            
+            # Uninitialize COM for this thread
+            pythoncom.CoUninitialize()
 
-            finally:
-                # Store result in the shared dictionary, protected by the lock
-                with self.tracker_lock:
-                    self.results_dict[original_index] = result
-                # Mark the task as done in the queue
-                self.task_queue.task_done()
-
-        # Clean up Word application when worker exits its loop
-        if self.word_app:
-            try:
-                self.word_app.Quit() 
-                del self.word_app 
-                self._log("Word Application quit and COM object released.", "blue")
-            except Exception as e:
-                self._log(f"Error quitting Word application: {e}", "red")
-        
-        # Uninitialize COM for this thread
-        pythoncom.CoUninitialize()
 
     def _get_unique_pdf_path_thread_safe(self, output_dir, proposed_pdf_filename, shared_tracker, tracker_lock):
         """
@@ -291,6 +316,12 @@ class BatchConverter:
     """
     def __init__(self, log_callback=None):
         self._log_callback = log_callback
+        self._stop_event = threading.Event() # Event to signal workers to stop
+        self._workers = [] # List to keep track of active worker threads
+        self._task_queue = None # Will be initialized in convert_batch_threaded
+        self._results_dict = None # Will be initialized in convert_batch_threaded
+        self._shared_filename_tracker = None # Will be initialized in convert_batch_threaded
+        self._tracker_lock = None # Will be initialized in convert_batch_threaded
 
     def _log(self, message, tag=None):
         """
@@ -309,6 +340,51 @@ class BatchConverter:
             colored_message = f"{color_map.get(tag, '')}{message}{color_map['reset']}"
             print(colored_message)
 
+    def _mark_remaining_tasks_as_failed(self):
+        """
+        Marks any tasks still in the queue as failed and updates results_dict.
+        This is called when conversion is explicitly stopped.
+        """
+        if self._task_queue is not None and self._results_dict is not None and self._tracker_lock is not None:
+            while not self._task_queue.empty():
+                try:
+                    task = self._task_queue.get_nowait() # Get without blocking
+                    original_index = task["original_index"]
+                    word_path = task["word_path"]
+                    original_filename = os.path.basename(word_path)
+
+                    self._log(f"Marking '{original_filename}' as failed (conversion stopped before processing).", "orange")
+                    result = {
+                        "original_index": original_index,
+                        "original_filename": original_filename,
+                        "input_path": word_path,
+                        "output_filename": None,
+                        "output_path": None,
+                        "status": "Failed",
+                        "message": "Conversion stopped by user before processing.",
+                        "renamed_due_to_collision": False
+                    }
+                    with self._tracker_lock: # Protect access to results_dict
+                        self._results_dict[original_index] = result
+                    self._task_queue.task_done()
+                except queue.Empty:
+                    # This should theoretically not happen due to while not empty check, but good practice
+                    break 
+                except Exception as e:
+                    self._log(f"Error marking remaining task as failed: {e}", "red")
+
+    def stop_conversion(self):
+        """
+        Signals all worker threads to stop and marks any unstarted tasks as failed.
+        This method can be called from another thread (e.g., GUI thread).
+        """
+        if not self._workers:
+            self._log("No active conversion to stop.", "orange")
+            return
+
+        self._log("Stopping conversion process...", "orange")
+        self._stop_event.set() # Set the event to signal all workers to stop
+
     def convert_batch_threaded(self, word_file_list, output_dir, naming_rule, num_threads=4):
         """
         Performs batch conversion of WORD files to PDF using multiple threads.
@@ -320,16 +396,17 @@ class BatchConverter:
             num_threads (int): The number of worker threads to use. Defaults to 4.
 
         Returns:
-            list: A list of dictionaries, each representing the result of a conversion,
-                  ordered by the original input list's index.
+            tuple: (final_results, converted_count, failed_count, total_files)
+                   final_results: A list of dictionaries, each representing the result of a conversion,
+                                  ordered by the original input list's index.
         """
         if sys.platform != "win32":
             self._log("This application requires Microsoft Word and pywin32, and therefore only runs on Windows.", "red")
-            return []
+            return [], 0, 0, 0
 
         if not word_file_list:
             self._log("No WORD files provided for conversion.", "orange")
-            return []
+            return [], 0, 0, 0
 
         # Ensure the output directory exists.
         if not os.path.isdir(output_dir):
@@ -338,15 +415,16 @@ class BatchConverter:
                 self._log(f"Created output directory: {output_dir}", "blue")
             except Exception as e:
                 self._log(f"Error: Could not create output directory '{output_dir}': {e}", "red")
-                return []
+                return [], 0, 0, 0
 
-        task_queue = queue.Queue()
-        # Use a dictionary to store results, keyed by original_index, for easy ordering later
-        results_dict = {}
-        # Shared tracker for unique filenames across threads
-        shared_filename_tracker = {}
-        # Lock for protecting shared_filename_tracker and results_dict
-        tracker_lock = threading.Lock()
+        # Reset state for a new conversion batch
+        self._stop_event.clear() # Ensure stop event is clear for a new run
+        self._workers = [] # Clear any old worker references
+
+        self._task_queue = queue.Queue()
+        self._results_dict = {}
+        self._shared_filename_tracker = {}
+        self._tracker_lock = threading.Lock()
 
         # Pre-process and populate the queue
         self._log(f"Preparing {len(word_file_list)} files for conversion...", "blue")
@@ -354,7 +432,7 @@ class BatchConverter:
             if not os.path.exists(word_path):
                 self._log(f"Skipping '{os.path.basename(word_path)}': Source file does not exist.", "red")
                 # Add a failed result immediately for non-existent files
-                results_dict[i] = {
+                self._results_dict[i] = {
                     "original_index": i,
                     "original_filename": os.path.basename(word_path),
                     "input_path": word_path,
@@ -367,45 +445,54 @@ class BatchConverter:
                 continue
 
             # Add task to queue
-            task_queue.put({
+            self._task_queue.put({
                 "original_index": i,
                 "word_path": word_path,
             })
         
-        self._log(f"Queue populated with {task_queue.qsize()} tasks.", "blue")
+        self._log(f"Queue populated with {self._task_queue.qsize()} tasks.", "blue")
 
-        workers = []
+        # Start worker threads
         for i in range(num_threads):
             worker = ConversionWorker(
                 worker_id=i + 1,
-                task_queue=task_queue,
-                results_dict=results_dict,
-                shared_tracker=shared_filename_tracker,
-                tracker_lock=tracker_lock,
+                task_queue=self._task_queue,
+                results_dict=self._results_dict,
+                shared_tracker=self._shared_filename_tracker,
+                tracker_lock=self._tracker_lock,
                 output_dir=output_dir,
                 naming_rule=naming_rule,
-                log_callback=self._log
+                log_callback=self._log,
+                stop_event=self._stop_event # Pass the stop event to workers
             )
-            workers.append(worker)
+            self._workers.append(worker)
             worker.start()
 
-        # Wait for all tasks in the queue to be processed
-        self._log("Waiting for all conversion tasks to complete...", "blue")
-        task_queue.join() # Blocks until all items in the queue have been gotten and processed.
-        self._log("All tasks processed by workers.", "blue")
-
-        # Wait for all worker threads to finish their execution (e.g., exiting due to empty queue)
-        for worker in workers:
+        # Wait for all worker threads to finish their execution.
+        # This will block until all workers naturally complete their tasks or are signaled to stop.
+        self._log("Waiting for all worker threads to finish...", "blue")
+        for worker in self._workers:
             worker.join()
-        self._log("All worker threads have finished.", "blue")
+
+        # After all worker threads have finished, check the status of the task queue.
+        if self._task_queue.empty():
+            self._log("All worker threads have finished.", "blue")
+        elif self._stop_event.is_set():
+            self._mark_remaining_tasks_as_failed()
+            self._log("All workers signaled to stop and joined.", "blue")
+        else:
+            self._mark_remaining_tasks_as_failed()
+            self._log("Conversion stopped. All remaining tasks marked as failed.", "orange")
 
         # Collect and sort results by original_index
-        final_results = [results_dict[i] for i in sorted(results_dict.keys())]
+        final_results = [self._results_dict[i] for i in sorted(self._results_dict.keys())]
         
         converted_count = sum(1 for r in final_results if r["status"] == "Success")
         failed_count = sum(1 for r in final_results if r["status"] == "Failed")
         total_files = len(final_results)
 
-        # self._log(f"Batch conversion complete. Converted: {converted_count}, Failed: {failed_count}, Total: {total_files}", "blue")
+        self._log(f"Batch conversion complete. Converted: {converted_count}, Failed: {failed_count}, Total: {total_files}", "blue")
+
+        print(final_results)
 
         return final_results, converted_count, failed_count, total_files
