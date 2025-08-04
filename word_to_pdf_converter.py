@@ -1,13 +1,15 @@
-# word_to_pdf_converter.py
 import os
 import win32com.client
 import pythoncom
 import re
-import sys # Import sys module for platform check
+import sys
+import threading
+import queue
+import time # For queue timeout
 
-class DocxConverterLogic:
+class WordConverterLogic:
     """
-    Handles the core logic for converting DOCX files to PDF using MS Word COM automation.
+    Handles the core logic for converting WORD files to PDF using MS Word COM automation.
     Designed to be used by a GUI or other application, providing logging via a callback.
     """
     def __init__(self, log_callback=None):
@@ -39,20 +41,20 @@ class DocxConverterLogic:
             colored_message = f"{color_map.get(tag, '')}{message}{color_map['reset']}"
             print(colored_message)
 
-    def get_pdf_filename(self, docx_path, naming_rule):
+    def get_pdf_filename(self, word_path, naming_rule):
         """
-        Determines the output PDF filename based on the DOCX path and selected naming rule.
+        Determines the output PDF filename based on the WORD path and selected naming rule.
         This method is public because the GUI needs to preview the PDF names.
         Note: This method provides the *intended* filename before uniqueness resolution.
 
         Args:
-            docx_path (str): The full path to the source DOCX file.
+            word_path (str): The full path to the source WORD file.
             naming_rule (str): The selected naming rule (e.g., "Original Name", "Remove Square Brackets").
 
         Returns:
             str: The calculated filename for the output PDF.
         """
-        base_name = os.path.splitext(os.path.basename(docx_path))[0]
+        base_name = os.path.splitext(os.path.basename(word_path))[0]
 
         if naming_rule == "Original Name":
             return f"{base_name}.pdf"
@@ -60,7 +62,7 @@ class DocxConverterLogic:
             # This rule specifically removes content within square brackets and the brackets themselves.
             # Use non-greedy matching (.*?) to handle multiple bracketed sections correctly.
             # Corrected regex: matches literal brackets by escaping them.
-            cleaned_base_name = re.sub(r'\[.*?\]', '', base_name)
+            cleaned_base_name = re.sub(r'[.*?]', '', base_name)
             # Remove any resulting multiple spaces and trim leading/trailing spaces
             cleaned_base_name = re.sub(r'\s+', ' ', cleaned_base_name).strip()
             # Handle cases where cleaning leaves an empty string or just spaces
@@ -71,130 +73,130 @@ class DocxConverterLogic:
             self._log(f"Warning: Unknown naming rule '{naming_rule}'. Using 'Original Name' as fallback.", "orange")
             return f"{base_name}.pdf"
 
-    def _get_unique_pdf_path(self, output_dir, proposed_pdf_filename, generated_filenames_tracker):
+class ConversionWorker(threading.Thread):
+    """
+    A worker thread that converts WORD files to PDF using its own Word Application instance.
+    """
+    def __init__(self, worker_id, task_queue, results_dict, shared_tracker, tracker_lock, output_dir, naming_rule, log_callback):
+        super().__init__()
+        self.worker_id = worker_id
+        self.task_queue = task_queue
+        self.results_dict = results_dict # Dictionary to store results by original_index
+        self.shared_tracker = shared_tracker # Shared dictionary for unique filenames
+        self.tracker_lock = tracker_lock # Lock for the shared_tracker
+        self.output_dir = output_dir
+        self.naming_rule = naming_rule
+        self.log_callback = log_callback
+        self.word_app = None
+        self.logic = WordConverterLogic(log_callback=self._log) # Each worker gets its own logic instance for logging
+
+    def _log(self, message, tag=None):
         """
-        Generates a unique PDF path by appending a counter if a file with the
-        same name already exists on disk or has been generated in this batch.
-
-        Args:
-            output_dir (str): The directory where the PDF will be saved.
-            proposed_pdf_filename (str): The initial proposed filename (e.g., "document.pdf").
-            generated_filenames_tracker (dict): A dictionary mapping base filenames
-                                                to the *next counter to try* for that base.
-
-        Returns:
-            str: A unique full path for the PDF file.
+        Internal logging method for the worker, prepends worker ID.
         """
-        base_name, ext = os.path.splitext(proposed_pdf_filename)
-        
-        # Get the starting counter for this base_name. If not seen, start from 0 (meaning no counter suffix yet).
-        # If seen, start from the next number that was previously suggested.
-        current_counter = generated_filenames_tracker.get(base_name, 0) 
+        if self.log_callback:
+            self.log_callback(f"[Worker {self.worker_id}] {message}", tag)
+        else:
+            # Fallback to console print if no callback provided
+            color_map = {
+                "blue": "\033[94m",
+                "orange": "\033[93m",
+                "green": "\033[92m",
+                "red": "\033[91m",
+                "reset": "\033[0m"
+            }
+            colored_message = f"{color_map.get(tag, '')}[Worker {self.worker_id}] {message}{color_map['reset']}"
+            print(colored_message)
 
-        unique_filename = ""
-        full_path_candidate = ""
-        
+    def run(self):
+        """
+        Main execution loop for the worker thread.
+        """
+        # Initialize COM for this thread
+        pythoncom.CoInitialize() 
+        self._log("Starting worker.", "blue")
         while True:
-            if current_counter == 0:
-                unique_filename = proposed_pdf_filename
-            else:
-                unique_filename = f"{base_name} ({current_counter}){ext}"
-            
-            full_path_candidate = os.path.join(output_dir, unique_filename)
-            
-            path_for_check = os.path.abspath(full_path_candidate)
-
-            # Check if this proposed path already exists on disk
-            # if os.path.exists(path_for_check):
-            #     current_counter += 1
-            #     continue # Try next counter
-            
-            break # Found a unique name
-
-        # Update the tracker with the *next* counter to try for this base_name
-        # This ensures that if 'doc.pdf' was used (counter 0), the next time 'doc' is encountered,
-        # it will start trying from 'doc (1).pdf' (counter 1).
-        generated_filenames_tracker[base_name] = current_counter + 1
-        
-        return path_for_check
-
-    def convert_batch(self, docx_file_list, output_dir, naming_rule):
-        """
-        Performs batch conversion of DOCX files to PDF using MS Word COM automation.
-        This method is designed to be run in a separate thread.
-
-        Args:
-            docx_file_list (list): A list of full paths to DOCX files.
-            output_dir (str): The directory where converted PDF files will be saved.
-            naming_rule (str): The rule to apply for naming the output PDF files.
-
-        Returns:
-            tuple: (converted_count, failed_count, total_files)
-        """
-        word = None
-        converted_count = 0
-        failed_count = 0
-        total_files = len(docx_file_list)
-        
-        # Tracker for unique filenames within this batch
-        # Maps base_name (e.g., "document") to the next counter to try (e.g., 1 for "document (1).pdf")
-        generated_filenames_tracker = {} 
-
-        try:
-            # Ensure the output directory exists.
-            if not os.path.isdir(output_dir):
-                try:
-                    os.makedirs(output_dir)
-                    self._log(f"Created output directory: {output_dir}", "blue")
-                except Exception as e:
-                    self._log(f"Error: Could not create output directory '{output_dir}': {e}", "red")
-                    return converted_count, failed_count, total_files
-
-            # Initialize Word Application
             try:
-                word = win32com.client.DispatchEx("Word.Application")
-                word.Visible = False
-                self._log("Launched a new, isolated Word Application instance.", "blue")
-            except Exception as e:
-                self._log(f"Error: Could not launch a new, isolated Word Application instance. Please ensure MS Word is installed and not corrupted. Details: {e}", "red")
-                return converted_count, failed_count, total_files
+                # Get a task from the queue with a timeout.
+                # If queue is empty for 1 second, it raises queue.Empty, and the worker exits.
+                task = self.task_queue.get(timeout=0.1) 
+            except queue.Empty:
+                self._log("Queue is empty, no more tasks. Exiting worker.", "blue")
+                break # Exit loop if queue is empty
 
-            for i, docx_path in enumerate(docx_file_list):
-                current_file_name_display = os.path.basename(docx_path)
-                self._log(f"[{i+1}/{total_files}] Processing: {current_file_name_display}", "orange")
+            original_index = task["original_index"]
+            word_path = task["word_path"]
+            original_filename = os.path.basename(word_path)
+            
+            # Initialize result structure for this file
+            result = {
+                "original_index": original_index,
+                "original_filename": original_filename,
+                "input_path": word_path,
+                "output_filename": None,
+                "output_path": None,
+                "status": "Failed",
+                "message": "",
+                "renamed_due_to_collision": False
+            }
 
-                doc = None 
+            try:
+                # Initialize Word Application for this worker if not already done
+                if self.word_app is None:
+                    try:
+                        self.word_app = win32com.client.DispatchEx("Word.Application")
+                        self.word_app.Visible = False
+                        self._log("Launched a new, isolated Word Application instance.", "blue")
+                    except Exception as e:
+                        error_msg = f"Could not launch Word Application instance. Please ensure MS Word is installed and not corrupted. Details: {e}"
+                        self._log(error_msg, "red")
+                        result["message"] = error_msg
+                        # Store result and mark task done before continuing to next task
+                        with self.tracker_lock:
+                            self.results_dict[original_index] = result
+                        continue # Skip to next task if Word app couldn't be launched
+
+                doc = None # Initialize doc object to None
                 try:
-                    if not os.path.exists(docx_path):
-                        self._log(f"Skipping '{current_file_name_display}': Source file does not exist.", "red")
-                        failed_count += 1
-                        continue
+                    if not os.path.exists(word_path):
+                        error_msg = f"Source file does not exist: '{original_filename}'"
+                        self._log(error_msg, "red")
+                        result["message"] = error_msg
+                        raise FileNotFoundError(error_msg)
 
-                    # Get the initial proposed PDF filename based on the naming rule
-                    proposed_pdf_filename = self.get_pdf_filename(docx_path, naming_rule)
+                    # Determine proposed PDF filename based on naming rule
+                    proposed_pdf_filename = self.logic.get_pdf_filename(word_path, self.naming_rule)
                     
-                    # Get a unique PDF path, handling duplicates
-                    unique_pdf_full_path = self._get_unique_pdf_path(output_dir, proposed_pdf_filename, generated_filenames_tracker)
+                    # Get a unique PDF path, handling duplicates with a shared tracker and lock
+                    final_pdf_full_path, renamed = self._get_unique_pdf_path_thread_safe(
+                        self.output_dir, proposed_pdf_filename, self.shared_tracker, self.tracker_lock
+                    )
                     
-                    # Extract the filename part for logging
-                    unique_pdf_file_name = os.path.basename(unique_pdf_full_path) 
+                    final_pdf_filename = os.path.basename(final_pdf_full_path)
+
+                    self._log(f"Processing '{original_filename}' -> '{final_pdf_filename}'", "orange")
 
                     # Open Word document
-                    doc = word.Documents.Open(
-                        os.path.abspath(docx_path), # Use the regular absolute path
+                    doc = self.word_app.Documents.Open(
+                        os.path.abspath(word_path), # Use the regular absolute path
                         ReadOnly=True,
                         ConfirmConversions=False,
                         AddToRecentFiles=False
                     )
 
                     # Save as PDF
-                    doc.SaveAs(unique_pdf_full_path, FileFormat=17) 
-                    doc.Close(False) 
-                    self._log(f"Successfully converted: {current_file_name_display} -> {unique_pdf_file_name}", "green")
-                    converted_count += 1
+                    doc.SaveAs(final_pdf_full_path, FileFormat=17) # 17 is wdFormatPDF
+                    doc.Close(False) # Close without saving changes to the original WORD
+                    
+                    result["status"] = "Success"
+                    result["output_filename"] = final_pdf_filename
+                    result["output_path"] = final_pdf_full_path
+                    result["renamed_due_to_collision"] = renamed
+                    result["message"] = "Successfully converted." + (" (Renamed due to collision)" if renamed else "")
+                    self._log(f"Successfully converted: '{original_filename}' -> '{final_pdf_filename}'", "green")
 
                 except pythoncom.com_error as com_e:
-                    error_message = f"Conversion of '{current_file_name_display}' failed due to COM error: {com_e}"
+                    error_message = f"Conversion of '{original_filename}' failed due to COM error: {com_e}"
                     if hasattr(com_e, 'ex_info') and com_e.ex_info and len(com_e.ex_info) > 1:
                         com_error_description = com_e.ex_info[1]
                         com_error_scode = com_e.ex_info[4]
@@ -204,32 +206,206 @@ class DocxConverterLogic:
                         elif com_error_scode == -2147024741: # HRESULT_FROM_WIN32(ERROR_BAD_PATHNAME) (0x8007007B)
                             error_message += "\nPossible cause: The path (source or destination) might be too long or invalid."
                     self._log(error_message, "red")
-                    failed_count += 1
-                    if doc:
+                    result["message"] = error_message
+                    if doc: # Try to close document even if conversion failed
                         try:
                             doc.Close(False)
                         except Exception as close_e:
                             self._log(f"Error closing document after failed COM conversion: {close_e}", "red")
 
                 except Exception as e:
-                    error_message = f"Conversion of '{current_file_name_display}' failed: {e}"
+                    error_message = f"Conversion of '{original_filename}' failed: {e}"
                     self._log(error_message, "red")
-                    failed_count += 1
-                    if doc:
+                    result["message"] = error_message
+                    if doc: # Try to close document even if conversion failed
                         try:
                             doc.Close(False)
                         except Exception as close_e:
                             self._log(f"Error closing document after failed general conversion: {close_e}", "red")
 
-        except Exception as e:
-            self._log(f"Fatal error during batch conversion: {e}", "red")
-        finally:
-            if word:
-                try:
-                    word.Quit() 
-                    del word 
-                    self._log("Word Application quit and COM object released.", "blue")
-                except Exception as e:
-                    self._log(f"Error quitting Word application: {e}", "red")
+            finally:
+                # Store result in the shared dictionary, protected by the lock
+                with self.tracker_lock:
+                    self.results_dict[original_index] = result
+                # Mark the task as done in the queue
+                self.task_queue.task_done()
 
-        return converted_count, failed_count, total_files
+        # Clean up Word application when worker exits its loop
+        if self.word_app:
+            try:
+                self.word_app.Quit() 
+                del self.word_app 
+                self._log("Word Application quit and COM object released.", "blue")
+            except Exception as e:
+                self._log(f"Error quitting Word application: {e}", "red")
+        
+        # Uninitialize COM for this thread
+        pythoncom.CoUninitialize()
+
+    def _get_unique_pdf_path_thread_safe(self, output_dir, proposed_pdf_filename, shared_tracker, tracker_lock):
+        """
+        Generates a unique PDF path, checking both disk existence and
+        names proposed by other threads in the current batch.
+        Returns the unique path and a boolean indicating if it was renamed.
+        """
+        base_name, ext = os.path.splitext(proposed_pdf_filename)
+        
+        renamed = False
+        
+        while True:
+            current_counter = 0 # Initialize for each attempt in the loop
+            with tracker_lock:
+                # Get the next counter to try for this base name from the shared tracker.
+                # This ensures that if 'doc.pdf' was used, the next time 'doc' is encountered,
+                # it will start trying from 'doc (1).pdf'.
+                current_counter = shared_tracker.get(base_name, 0)
+                
+                if current_counter == 0:
+                    unique_filename = proposed_pdf_filename
+                else:
+                    unique_filename = f"{base_name} ({current_counter}){ext}"
+                    renamed = True # Mark as renamed if a counter is applied
+
+                full_path_candidate = os.path.join(output_dir, unique_filename)
+                path_for_check = os.path.abspath(full_path_candidate)
+
+                # Check if this proposed path already exists on disk
+                if os.path.exists(path_for_check):
+                    self._log(f"Path '{path_for_check}' already exists on disk. Incrementing counter and retrying.", "orange")
+                    # Update tracker to reserve this new counter for this base_name
+                    shared_tracker[base_name] = current_counter + 1
+                    continue # Try next counter in the next iteration of the while loop
+
+                # If we reach here, the path does not exist on disk.
+                # We now "reserve" this name by incrementing the counter in the shared tracker
+                # for the *next* time this base_name is requested.
+                shared_tracker[base_name] = current_counter + 1
+                break # Found a unique name and reserved it
+
+        return path_for_check, renamed
+
+
+class BatchConverter:
+    """
+    Orchestrates the multi-threaded batch conversion of WORD files to PDF.
+    """
+    def __init__(self, log_callback=None):
+        self._log_callback = log_callback
+
+    def _log(self, message, tag=None):
+        """
+        Main logging method for the batch converter.
+        """
+        if self._log_callback:
+            self._log_callback(message, tag)
+        else:
+            color_map = {
+                "blue": "\033[94m",
+                "orange": "\033[93m",
+                "green": "\033[92m",
+                "red": "\033[91m",
+                "reset": "\033[0m"
+            }
+            colored_message = f"{color_map.get(tag, '')}{message}{color_map['reset']}"
+            print(colored_message)
+
+    def convert_batch_threaded(self, word_file_list, output_dir, naming_rule, num_threads=4):
+        """
+        Performs batch conversion of WORD files to PDF using multiple threads.
+
+        Args:
+            word_file_list (list): A list of full paths to WORD files.
+            output_dir (str): The directory where converted PDF files will be saved.
+            naming_rule (str): The rule to apply for naming the output PDF files.
+            num_threads (int): The number of worker threads to use. Defaults to 4.
+
+        Returns:
+            list: A list of dictionaries, each representing the result of a conversion,
+                  ordered by the original input list's index.
+        """
+        if sys.platform != "win32":
+            self._log("This application requires Microsoft Word and pywin32, and therefore only runs on Windows.", "red")
+            return []
+
+        if not word_file_list:
+            self._log("No WORD files provided for conversion.", "orange")
+            return []
+
+        # Ensure the output directory exists.
+        if not os.path.isdir(output_dir):
+            try:
+                os.makedirs(output_dir)
+                self._log(f"Created output directory: {output_dir}", "blue")
+            except Exception as e:
+                self._log(f"Error: Could not create output directory '{output_dir}': {e}", "red")
+                return []
+
+        task_queue = queue.Queue()
+        # Use a dictionary to store results, keyed by original_index, for easy ordering later
+        results_dict = {}
+        # Shared tracker for unique filenames across threads
+        shared_filename_tracker = {}
+        # Lock for protecting shared_filename_tracker and results_dict
+        tracker_lock = threading.Lock()
+
+        # Pre-process and populate the queue
+        self._log(f"Preparing {len(word_file_list)} files for conversion...", "blue")
+        for i, word_path in enumerate(word_file_list):
+            if not os.path.exists(word_path):
+                self._log(f"Skipping '{os.path.basename(word_path)}': Source file does not exist.", "red")
+                # Add a failed result immediately for non-existent files
+                results_dict[i] = {
+                    "original_index": i,
+                    "original_filename": os.path.basename(word_path),
+                    "input_path": word_path,
+                    "output_filename": None,
+                    "output_path": None,
+                    "status": "Failed",
+                    "message": "Source file does not exist.",
+                    "renamed_due_to_collision": False
+                }
+                continue
+
+            # Add task to queue
+            task_queue.put({
+                "original_index": i,
+                "word_path": word_path,
+            })
+        
+        self._log(f"Queue populated with {task_queue.qsize()} tasks.", "blue")
+
+        workers = []
+        for i in range(num_threads):
+            worker = ConversionWorker(
+                worker_id=i + 1,
+                task_queue=task_queue,
+                results_dict=results_dict,
+                shared_tracker=shared_filename_tracker,
+                tracker_lock=tracker_lock,
+                output_dir=output_dir,
+                naming_rule=naming_rule,
+                log_callback=self._log
+            )
+            workers.append(worker)
+            worker.start()
+
+        # Wait for all tasks in the queue to be processed
+        self._log("Waiting for all conversion tasks to complete...", "blue")
+        task_queue.join() # Blocks until all items in the queue have been gotten and processed.
+        self._log("All tasks processed by workers.", "blue")
+
+        # Wait for all worker threads to finish their execution (e.g., exiting due to empty queue)
+        for worker in workers:
+            worker.join()
+        self._log("All worker threads have finished.", "blue")
+
+        # Collect and sort results by original_index
+        final_results = [results_dict[i] for i in sorted(results_dict.keys())]
+        
+        converted_count = sum(1 for r in final_results if r["status"] == "Success")
+        failed_count = sum(1 for r in final_results if r["status"] == "Failed")
+        total_files = len(final_results)
+
+        # self._log(f"Batch conversion complete. Converted: {converted_count}, Failed: {failed_count}, Total: {total_files}", "blue")
+
+        return final_results, converted_count, failed_count, total_files

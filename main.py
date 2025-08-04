@@ -1,12 +1,18 @@
 # main.py
-import tkinter as tk
+import tkinter as tk # Keep standard tkinter import
 from tkinter import filedialog, messagebox, scrolledtext
-from tkinter import ttk # Import ttk module for Treeview
+from tkinter import ttk 
 import os
 import threading
 
+# Import TkinterDnD2 for DND functionality
+# We need to import TkinterDnD2.Tk() for the root window
+# and DND_FILES for drop target registration.
+from tkinterdnd2 import DND_FILES, TkinterDnD # Import specifically for DND features
+
 # Import the logic module
-from word_to_pdf_converter import DocxConverterLogic
+# Assuming word_to_pdf_converter.py exists and contains DocxConverterLogic and BatchConverter
+from word_to_pdf_converter import WordConverterLogic, BatchConverter
 
 class DocxToPdfConverterApp:
     """
@@ -14,56 +20,45 @@ class DocxToPdfConverterApp:
     It uses a separate logic class for the conversion process to maintain separation of concerns.
     """
     def __init__(self, master):
-        self.master = master
-        master.title("DOCX Batch to PDF Converter")
-        master.geometry("700x680") # Adjusted initial window size for Treeview
+        # master should be an instance of TkinterDnD2.Tk()
+        self.master = master 
+        master.title("Word Batch to PDF Converter") 
+        master.geometry("700x680") 
         master.resizable(False, False)
 
         # Configure column weights for grid layout
         master.grid_columnconfigure(1, weight=1)
 
-        # Tkinter variables to store file paths and directories
-        # self.selected_docx_files_data will now store dictionaries with 'path' and 'treeview_id'
-        self.selected_docx_files_data = [] # List to store dicts: {'path': full_path, 'treeview_id': item_id}
-        self.output_pdf_dir = tk.StringVar()
-        
-        # Variable for naming rule selection
-        self.naming_rule_var = tk.StringVar(master)
-        # These naming rules must match the strings expected by DocxConverterLogic.get_pdf_filename
+        self.selected_docx_files_data = [] 
+        self.output_pdf_dir = tk.StringVar() # Use tk.StringVar
+
+        self.naming_rule_var = tk.StringVar(master) # Use tk.StringVar
         self.naming_rules = ["Original Name", "Remove Square Brackets"] 
-        self.naming_rule_var.set(self.naming_rules[0]) # Set default value
-        
-        # Trace changes to naming_rule_var to update Treeview immediately
+        self.naming_rule_var.set(self.naming_rules[0]) 
         self.naming_rule_var.trace_add("write", self.on_naming_rule_change)
 
-        # Initialize the conversion logic, passing the GUI's log_status method as a callback
-        self.converter_logic = DocxConverterLogic(log_callback=self.log_status)
+        self.batch_converter = BatchConverter(log_callback=self.log_status)
+        self.converter_logic = WordConverterLogic(log_callback=self.log_status)
 
         # --- GUI Control Layout ---
 
-        # Treeview for file list
-        tk.Label(master, text="DOCX Files to Convert:").grid(row=0, column=0, padx=10, pady=5, sticky="w")
+        tk.Label(master, text="Word Files to Convert:").grid(row=0, column=0, padx=10, pady=5, sticky="w") # Use tk.Label
         
-        # Frame to hold Treeview and Scrollbar
-        tree_frame = tk.Frame(master)
+        tree_frame = tk.Frame(master) # Use tk.Frame
         tree_frame.grid(row=1, column=0, columnspan=3, padx=10, pady=5, sticky="nsew")
-        tree_frame.grid_columnconfigure(0, weight=1) # Allow Treeview to expand
-        tree_frame.grid_rowconfigure(0, weight=1) # Allow Treeview to expand
+        tree_frame.grid_columnconfigure(0, weight=1) 
+        tree_frame.grid_rowconfigure(0, weight=1) 
 
-        # Define Treeview
         self.docx_treeview = ttk.Treeview(tree_frame, columns=("original_docx", "converted_pdf"), show="headings", selectmode="extended")
         
-        # Define column headings
-        self.docx_treeview.heading("original_docx", text="Original DOCX File")
+        self.docx_treeview.heading("original_docx", text="Original Word File")
         self.docx_treeview.heading("converted_pdf", text="Converted PDF Name (Preview)")
         
-        # Define column widths and anchoring
         self.docx_treeview.column("original_docx", width=300, anchor="w")
         self.docx_treeview.column("converted_pdf", width=300, anchor="w")
         
         self.docx_treeview.grid(row=0, column=0, sticky="nsew")
 
-        # Scrollbar for the Treeview
         self.treeview_scrollbar_y = ttk.Scrollbar(tree_frame, orient="vertical", command=self.docx_treeview.yview)
         self.treeview_scrollbar_y.grid(row=0, column=1, sticky="ns")
         self.docx_treeview.config(yscrollcommand=self.treeview_scrollbar_y.set)
@@ -72,37 +67,45 @@ class DocxToPdfConverterApp:
         self.treeview_scrollbar_x.grid(row=1, column=0, sticky="ew")
         self.docx_treeview.config(xscrollcommand=self.treeview_scrollbar_x.set)
 
+        # Bind DND for Treeview
+        self.docx_treeview.drop_target_register(DND_FILES) # Use DND_FILES
+        self.docx_treeview.dnd_bind('<<Drop>>', self.handle_treeview_drop) # Bind the drop event
+
         # File operation buttons
-        self.add_files_btn = tk.Button(master, text="Add DOCX Files...", command=self.add_docx_files)
+        self.add_files_btn = tk.Button(master, text="Add Word Files...", command=self.add_docx_files) # Use tk.Button
         self.add_files_btn.grid(row=2, column=0, padx=10, pady=5, sticky="w")
         
-        self.clear_list_btn = tk.Button(master, text="Clear All", command=self.clear_docx_list)
+        self.clear_list_btn = tk.Button(master, text="Clear All", command=self.clear_docx_list) # Use tk.Button
         self.clear_list_btn.grid(row=2, column=1, padx=10, pady=5, sticky="w")
         
-        self.remove_selected_btn = tk.Button(master, text="Remove Selected", command=self.remove_selected_files)
+        self.remove_selected_btn = tk.Button(master, text="Remove Selected", command=self.remove_selected_files) # Use tk.Button
         self.remove_selected_btn.grid(row=2, column=2, padx=10, pady=5, sticky="w")
 
         # PDF output directory selection
-        tk.Label(master, text="Output PDF Directory:").grid(row=3, column=0, padx=10, pady=5, sticky="w")
-        self.output_dir_entry = tk.Entry(master, textvariable=self.output_pdf_dir, width=70)
+        tk.Label(master, text="Output PDF Directory:").grid(row=3, column=0, padx=10, pady=5, sticky="w") # Use tk.Label
+        self.output_dir_entry = tk.Entry(master, textvariable=self.output_pdf_dir, width=70) # Use tk.Entry
         self.output_dir_entry.grid(row=3, column=1, padx=10, pady=5, sticky="ew")
-        self.browse_dir_btn = tk.Button(master, text="Select Directory...", command=self.select_output_directory)
+        self.browse_dir_btn = tk.Button(master, text="Select Directory...", command=self.select_output_directory) # Use tk.Button
         self.browse_dir_btn.grid(row=3, column=2, padx=10, pady=5)
 
+        # Bind DND for Output Directory Entry
+        self.output_dir_entry.drop_target_register(DND_FILES) # Use DND_FILES
+        self.output_dir_entry.dnd_bind('<<Drop>>', self.handle_output_dir_drop) # Bind the drop event
+
         # PDF Naming Rule selection
-        tk.Label(master, text="PDF Naming Rule:").grid(row=4, column=0, padx=10, pady=5, sticky="w")
-        self.naming_rule_menu = tk.OptionMenu(master, self.naming_rule_var, *self.naming_rules)
+        tk.Label(master, text="PDF Naming Rule:").grid(row=4, column=0, padx=10, pady=5, sticky="w") # Use tk.Label
+        self.naming_rule_menu = tk.OptionMenu(master, self.naming_rule_var, *self.naming_rules) # Use tk.OptionMenu
         self.naming_rule_menu.grid(row=4, column=1, padx=10, pady=5, sticky="ew")
         self.naming_rule_menu.config(width=20) 
 
         # Convert button
-        self.convert_btn = tk.Button(master, text="Start Batch Conversion", command=self.start_batch_conversion_thread,
+        self.convert_btn = tk.Button(master, text="Start Batch Conversion", command=self.start_batch_conversion_thread, # Use tk.Button
                                      height=2, width=20, bg="lightblue", font=("Arial", 12, "bold"))
         self.convert_btn.grid(row=5, column=0, columnspan=3, pady=20)
 
-        # Status display area (using ScrolledText for multi-line logs)
-        tk.Label(master, text="Conversion Log/Status:").grid(row=6, column=0, padx=10, pady=5, sticky="w")
-        self.status_text = scrolledtext.ScrolledText(master, width=80, height=8, state=tk.DISABLED, wrap=tk.WORD)
+        # Status display area
+        tk.Label(master, text="Conversion Log/Status:").grid(row=6, column=0, padx=10, pady=5, sticky="w") # Use tk.Label
+        self.status_text = scrolledtext.ScrolledText(master, width=80, height=8, state=tk.DISABLED, wrap=tk.WORD) # Use tk.DISABLED, tk.WORD
         self.status_text.grid(row=7, column=0, columnspan=3, padx=10, pady=5, sticky="ew")
 
         # Configure tags for colored logging
@@ -124,10 +127,10 @@ class DocxToPdfConverterApp:
 
     def _update_status_text(self, message, tag):
         """Actual GUI update for status text, called from the main thread."""
-        self.status_text.config(state=tk.NORMAL)
-        self.status_text.insert(tk.END, message + "\n", tag)
+        self.status_text.config(state=tk.NORMAL) # Use tk.NORMAL
+        self.status_text.insert(tk.END, message + "\n", tag) # Use tk.END
         self.status_text.see(tk.END) # Scroll to the latest message
-        self.status_text.config(state=tk.DISABLED)
+        self.status_text.config(state=tk.DISABLED) # Use tk.DISABLED
 
     def _get_treeview_item_data(self, docx_full_path, naming_rule):
         """
@@ -159,24 +162,45 @@ class DocxToPdfConverterApp:
             temp_selected_docx_files_data.append({'path': docx_path, 'treeview_id': item_id})
         self.selected_docx_files_data = temp_selected_docx_files_data # Update the main list
 
-    def add_docx_files(self):
-        """Opens file dialog to select multiple DOCX files and adds them to the list."""
-        file_paths = filedialog.askopenfilenames(
-            title="Select DOCX Files",
-            filetypes=[
-                ("Word Documents (*.docx)", "*.docx"),
-                ("Word Macro-Enabled Documents (*.docm)", "*.docm"),
-                ("Word 97-2003 Documents (*.doc)", "*.doc"),
-                ("Word Templates (*.dotx;*.dotm;*.dot)", "*.dotx *.dotm *.dot"),
-                ("Rich Text Format (*.rtf)", "*.rtf"),
-                ("OpenDocument Text (*.odt)", "*.odt"),
-                ("All Supported Word Formats", "*.docx *.docm *.doc *.dotx *.dotm *.dot *.rtf *.odt"), # Consolidated
-                ("All Files", "*.*")
-            ]
-        )
+    # Modified add_docx_files to accept an optional file_paths argument for DND
+    def add_docx_files(self, file_paths=None):
+        """Opens file dialog to select multiple DOCX files or adds provided paths from DND."""
+        if file_paths is None: # If called from button, open dialog
+            file_paths = filedialog.askopenfilenames(
+                title="Select Word Files", # Changed dialog title
+                filetypes=[
+                    ("Word Documents (*.docx)", "*.docx"),
+                    ("Word Macro-Enabled Documents (*.docm)", "*.docm"),
+                    ("Word 97-2003 Documents (*.doc)", "*.doc"),
+                    ("Word Templates (*.dotx;*.dotm;*.dot)", "*.dotx *.dotm *.dot"),
+                    ("Rich Text Format (*.rtf)", "*.rtf"),
+                    ("OpenDocument Text (*.odt)", "*.odt"),
+                    ("All Supported Word Formats", "*.docx *.docm *.doc *.dotx *.dotm *.dot *.rtf *.odt"), # Consolidated
+                    ("All Files", "*.*")
+                ]
+            )
+        
         if file_paths:
             added_count = 0
+            # Ensure file_paths is iterable and parse it correctly if it's a DND string
+            if isinstance(file_paths, str):
+                # TkinterDnD2's event.data can return a space-separated string of paths
+                # Use master.tk.splitlist to handle paths with spaces correctly
+                file_paths = self.master.tk.splitlist(file_paths)
+
             for f_path in file_paths:
+                # Basic check for file existence and common Word file extensions
+                if not os.path.isfile(f_path):
+                    self.log_status(f"Dropped item is not a file or does not exist: {f_path}", "orange")
+                    continue
+                
+                # Check if it's a common Word document extension
+                # This list should ideally match the filetypes in askopenfilenames
+                valid_extensions = ('.docx', '.docm', '.doc', '.dotx', '.dotm', '.dot', '.rtf', '.odt')
+                if not f_path.lower().endswith(valid_extensions):
+                    self.log_status(f"Skipping non-Word file: {os.path.basename(f_path)}", "orange")
+                    continue
+
                 # Check if the file path already exists in our data list
                 if not any(data['path'] == f_path for data in self.selected_docx_files_data):
                     # For new items, treeview_id is None initially. It will be set by refresh_treeview_display.
@@ -186,7 +210,27 @@ class DocxToPdfConverterApp:
                 self.log_status(f"Added {added_count} file(s).", "blue")
                 self.refresh_treeview_display() # Refresh the entire Treeview display
             else:
-                self.log_status("No new files added (might already exist).", "blue")
+                self.log_status("No new files added (might already exist or are not supported Word formats).", "blue")
+
+    def handle_treeview_drop(self, event):
+        """Handles files dropped onto the Treeview (file list)."""
+        # event.data contains the paths of the dropped files/folders
+        self.log_status(f"Files dropped onto list: {event.data}", "blue")
+        self.add_docx_files(event.data) # Pass the dropped paths to add_docx_files
+
+    def handle_output_dir_drop(self, event):
+        """Handles directory dropped onto the output directory entry."""
+        dropped_paths = self.master.tk.splitlist(event.data)
+        if dropped_paths:
+            # We only expect one directory to be dropped for the output path
+            # If multiple items are dropped, take the first one and check if it's a directory
+            potential_dir = dropped_paths[0]
+            if os.path.isdir(potential_dir):
+                self.output_pdf_dir.set(potential_dir)
+                self.log_status(f"Output directory set by drag-and-drop: {potential_dir}", "blue")
+            else:
+                self.log_status(f"Dropped item is not a valid directory: {potential_dir}", "orange")
+                messagebox.showwarning("Invalid Drop", "Please drop a single directory for the output path.")
 
     def clear_docx_list(self):
         """Clears the DOCX file list in the GUI and the internal list."""
@@ -238,8 +282,8 @@ class DocxToPdfConverterApp:
         docx_paths_for_conversion = [item_data['path'] for item_data in self.selected_docx_files_data]
 
         if not docx_paths_for_conversion:
-            self.log_status("Error: Please add DOCX files first.", "red")
-            messagebox.showerror("Error", "Please add DOCX files for conversion.")
+            self.log_status("Error: Please add Word files first.", "red") 
+            messagebox.showerror("Error", "Please add Word files for conversion.") 
             return
 
         output_dir = self.output_pdf_dir.get()
@@ -262,7 +306,7 @@ class DocxToPdfConverterApp:
         selected_naming_rule = self.naming_rule_var.get() # Get the selected naming rule
 
         # Disable buttons and update status to indicate conversion is in progress
-        self.convert_btn.config(state=tk.DISABLED, text="Converting in progress...", bg="lightgray")
+        self.convert_btn.config(state=tk.DISABLED, text="Converting in progress...", bg="lightgray") # Use tk.DISABLED
         self.add_files_btn.config(state=tk.DISABLED)
         self.clear_list_btn.config(state=tk.DISABLED)
         self.remove_selected_btn.config(state=tk.DISABLED)
@@ -282,27 +326,27 @@ class DocxToPdfConverterApp:
     def _run_conversion_in_thread(self, docx_file_list, output_dir, naming_rule):
         """
         Wrapper function to run the conversion logic in a separate thread.
-        It calls the DocxConverterLogic and then schedules the final GUI update.
+        It calls the BatchConverter and then schedules the final GUI update.
         """
         converted_count, failed_count, total_files = 0, 0, 0
         try:
             # Call the conversion logic from the separate thread, passing the naming rule
-            converted_count, failed_count, total_files = self.converter_logic.convert_batch(
+            final_results, converted_count, failed_count, total_files = self.batch_converter.convert_batch_threaded(
                 docx_file_list, output_dir, naming_rule
             )
         except Exception as e:
             self.log_status(f"An unexpected error occurred during conversion: {e}", "red")
         finally:
             # Schedule the final UI update to run on the main Tkinter thread
-            self.master.after(0, self._conversion_complete, converted_count, failed_count, total_files)
+            self.master.after(0, self._conversion_complete, final_results, converted_count, failed_count, total_files)
 
-    def _conversion_complete(self, converted_count, failed_count, total_files):
+    def _conversion_complete(self, final_results, converted_count, failed_count, total_files):
         """
         This method is called on the main Tkinter thread after the conversion thread finishes.
         It re-enables buttons and shows the final summary to the user.
         """
         # Re-enable GUI elements
-        self.convert_btn.config(state=tk.NORMAL, text="Start Batch Conversion", bg="lightblue")
+        self.convert_btn.config(state=tk.NORMAL, text="Start Batch Conversion", bg="lightblue") # Use tk.NORMAL
         self.add_files_btn.config(state=tk.NORMAL)
         self.clear_list_btn.config(state=tk.NORMAL)
         self.remove_selected_btn.config(state=tk.NORMAL)
@@ -319,13 +363,14 @@ class DocxToPdfConverterApp:
         final_message = (
             f"Batch conversion complete!\n"
             f"Successfully converted: {converted_count} file(s)\n"
-            f"Failed: {failed_count} file(s)"
+            f"Failed: {failed_count} file(s)\n" 
+            f"Total: {total_files} file(s)"
         )
         self.log_status(final_message, "blue")
         messagebox.showinfo("Batch Conversion Complete", final_message)
 
 
 if __name__ == "__main__":
-    root = tk.Tk()
+    root = TkinterDnD.Tk() # IMPORTANT: Use TkinterDnD.Tk() for the root window
     app = DocxToPdfConverterApp(root)
     root.mainloop()
