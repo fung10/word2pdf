@@ -1,4 +1,3 @@
-# main.py
 import tkinter as tk
 from tkinter import filedialog, messagebox, scrolledtext
 from tkinter import ttk 
@@ -36,8 +35,6 @@ class WordToPdfConverterApp:
         self.summary_window_open = False
         self.master.protocol("WM_DELETE_WINDOW", self.on_main_window_close)
 
-        # --- GUI Control Layout ---
-
         tk.Label(master, text="Word Files to Convert:").grid(row=0, column=0, padx=10, pady=5, sticky="w")
 
         tree_frame = tk.Frame(master)
@@ -63,18 +60,13 @@ class WordToPdfConverterApp:
         self.treeview_scrollbar_x.grid(row=1, column=0, sticky="ew")
         self.word_treeview.config(xscrollcommand=self.treeview_scrollbar_x.set)
 
-        # Bind DND for Treeview
         self.word_treeview.drop_target_register(DND_FILES)
         self.word_treeview.dnd_bind('<<Drop>>', self.handle_treeview_drop)
 
-        # --- File operation buttons with DND frames ---
-        # Frame for Add Word Files button to enable DND
-        # NEW: Initial border and relief are flat/0
         self.add_files_frame = tk.Frame(master, bd=0, relief="flat") 
         self.add_files_frame.grid(row=2, column=0, padx=10, pady=5, sticky="w")
         self.add_files_frame.drop_target_register(DND_FILES)
         self.add_files_frame.dnd_bind('<<Drop>>', self.handle_add_files_drop)
-        # NEW: Bind DragEnter and DragLeave events
         self.add_files_frame.dnd_bind('<<DragEnter>>', self._on_dnd_enter)
         self.add_files_frame.dnd_bind('<<DragLeave>>', self._on_dnd_leave)
 
@@ -86,38 +78,29 @@ class WordToPdfConverterApp:
 
         self.remove_selected_btn = tk.Button(master, text="Remove Selected", command=self.remove_selected_files)
         self.remove_selected_btn.grid(row=2, column=2, padx=10, pady=5, sticky="w")
-        # --- END File operation buttons ---
 
-        # PDF output directory selection
         tk.Label(master, text="Output PDF Directory:").grid(row=3, column=0, padx=10, pady=5, sticky="w")
         self.output_dir_entry = tk.Entry(master, textvariable=self.output_pdf_dir, width=70)
         self.output_dir_entry.grid(row=3, column=1, padx=10, pady=5, sticky="ew")
         
-        # --- Frame for Select Directory button to enable DND ---
-        # NEW: Initial border and relief are flat/0
         self.browse_dir_frame = tk.Frame(master, bd=0, relief="flat") 
         self.browse_dir_frame.grid(row=3, column=2, padx=10, pady=5)
         self.browse_dir_frame.drop_target_register(DND_FILES)
         self.browse_dir_frame.dnd_bind('<<Drop>>', self.handle_output_dir_drop)
-        # NEW: Bind DragEnter and DragLeave events
         self.browse_dir_frame.dnd_bind('<<DragEnter>>', self._on_dnd_enter)
         self.browse_dir_frame.dnd_bind('<<DragLeave>>', self._on_dnd_leave)
 
         self.browse_dir_btn = tk.Button(self.browse_dir_frame, text="Select Directory...", command=self.select_output_directory)
         self.browse_dir_btn.pack(padx=5, pady=5)
-        # --- END Frame for Select Directory button ---
 
-        # Bind DND for Output Directory Entry (already exists, keep it)
         self.output_dir_entry.drop_target_register(DND_FILES)
         self.output_dir_entry.dnd_bind('<<Drop>>', self.handle_output_dir_drop)
 
-        # PDF Naming Rule selection
         tk.Label(master, text="PDF Naming Rule:").grid(row=4, column=0, padx=10, pady=5, sticky="w")
         self.naming_rule_menu = tk.OptionMenu(master, self.naming_rule_var, *self.naming_rules)
         self.naming_rule_menu.grid(row=4, column=1, padx=10, pady=5, sticky="ew")
         self.naming_rule_menu.config(width=20)
 
-        # --- Modified Section for Centering Buttons ---
         button_frame = tk.Frame(master)
         button_frame.grid(row=5, column=0, columnspan=3, pady=20)
 
@@ -133,20 +116,16 @@ class WordToPdfConverterApp:
         self.stop_btn = tk.Button(button_frame, text="Stop Conversion", command=self.stop_batch_conversion_thread,
                                   height=2, width=15, bg="salmon", font=("Arial", 12, "bold"), state=tk.DISABLED)
         self.stop_btn.grid(row=0, column=2)
-        # --- End Modified Section ---
 
-        # Status display area
         tk.Label(master, text="Conversion Log/Status:").grid(row=6, column=0, padx=10, pady=5, sticky="w")
         self.status_text = scrolledtext.ScrolledText(master, width=80, height=8, state=tk.DISABLED, wrap=tk.WORD)
         self.status_text.grid(row=7, column=0, columnspan=3, padx=10, pady=5, sticky="ew")
 
-        # Configure tags for colored logging
         self.status_text.tag_config("green", foreground="green")
         self.status_text.tag_config("red", foreground="red")
         self.status_text.tag_config("blue", foreground="blue")
         self.status_text.tag_config("orange", foreground="orange")
 
-        # Initial display update
         self.refresh_treeview_display()
 
     def log_status(self, message, tag=None):
@@ -186,7 +165,7 @@ class WordToPdfConverterApp:
 
     def add_word_files(self, file_paths=None):
         """Opens file dialog to select multiple Word files or adds provided paths from DND."""
-        if file_paths is None: # If called from button, open dialog
+        if file_paths is None:
             file_paths = filedialog.askopenfilenames(
                 title="Select Word Files",
                 filetypes=[
@@ -203,23 +182,35 @@ class WordToPdfConverterApp:
         
         if file_paths:
             added_count = 0
-            # Ensure file_paths is iterable and parse it correctly if it's a DND string
             if isinstance(file_paths, str):
                 file_paths = self.master.tk.splitlist(file_paths)
 
             for f_path in file_paths:
-                if not os.path.isfile(f_path):
-                    self.log_status(f"Dropped item is not a file or does not exist: {f_path}", "orange")
-                    continue
-                
-                valid_extensions = ('.docx', '.docm', '.doc', '.dotx', '.dotm', '.dot', '.rtf', '.odt')
-                if not f_path.lower().endswith(valid_extensions):
-                    self.log_status(f"Skipping non-Word file: {os.path.basename(f_path)}", "orange")
-                    continue
+                if os.path.isdir(f_path): # Handle directories
+                    self.log_status(f"Scanning directory: {os.path.basename(f_path)}", "blue")
+                    for item_name in os.listdir(f_path):
+                        full_item_path = os.path.join(f_path, item_name)
+                        if os.path.isfile(full_item_path):
+                            valid_extensions = ('.docx', '.docm', '.doc', '.dotx', '.dotm', '.dot', '.rtf', '.odt')
+                            if full_item_path.lower().endswith(valid_extensions):
+                                if not any(data['path'] == full_item_path for data in self.selected_word_files_data):
+                                    self.selected_word_files_data.append({'path': full_item_path, 'treeview_id': None})
+                                    added_count += 1
+                            else:
+                                self.log_status(f"Skipping non-Word file in directory: {item_name}", "orange")
+                elif os.path.isfile(f_path): # Handle individual files
+                    valid_extensions = ('.docx', '.docm', '.doc', '.dotx', '.dotm', '.dot', '.rtf', '.odt')
+                    if not f_path.lower().endswith(valid_extensions):
+                        self.log_status(f"Skipping non-Word file: {os.path.basename(f_path)}", "orange")
+                        continue
 
-                if not any(data['path'] == f_path for data in self.selected_word_files_data):
-                    self.selected_word_files_data.append({'path': f_path, 'treeview_id': None})
-                    added_count += 1
+                    if not any(data['path'] == f_path for data in self.selected_word_files_data):
+                        self.selected_word_files_data.append({'path': f_path, 'treeview_id': None})
+                        added_count += 1
+                else:
+                    self.log_status(f"Dropped item is not a file or directory or does not exist: {f_path}", "orange")
+                    continue
+            
             if added_count > 0:
                 self.log_status(f"Added {added_count} file(s).", "blue")
                 self.refresh_treeview_display()
@@ -227,15 +218,15 @@ class WordToPdfConverterApp:
                 self.log_status("No new files added (might already exist or are not supported Word formats).", "blue")
 
     def handle_treeview_drop(self, event):
-        """Handles files dropped onto the Treeview (file list)."""
-        self.log_status(f"Files dropped onto list.", "blue")
+        """Handles files/folders dropped onto the Treeview (file list)."""
+        self.log_status(f"Items dropped onto list.", "blue")
         self.add_word_files(event.data)
 
     def handle_add_files_drop(self, event):
-        """Handles files dropped onto the 'Add Word Files' button's frame."""
-        self.log_status(f"Files dropped onto 'Add Word Files' button.", "blue")
+        """Handles files/folders dropped onto the 'Add Word Files' button's frame."""
+        self.log_status(f"Items dropped onto 'Add Word Files' button.", "blue")
         self.add_word_files(event.data)
-        self._reset_dnd_frame_style(event.widget) # NEW: Reset border after drop
+        self._reset_dnd_frame_style(event.widget)
 
     def handle_output_dir_drop(self, event):
         """Handles directory dropped onto the output directory entry or its button's frame."""
@@ -248,7 +239,7 @@ class WordToPdfConverterApp:
             else:
                 self.log_status(f"Dropped item is not a valid directory: {potential_dir}", "orange")
                 messagebox.showwarning("Invalid Drop", "Please drop a single directory for the output path.")
-        self._reset_dnd_frame_style(event.widget) # NEW: Reset border after drop
+        self._reset_dnd_frame_style(event.widget)
 
     def clear_word_list(self):
         """Clears the Word file list in the GUI and the internal list."""
@@ -319,7 +310,26 @@ class WordToPdfConverterApp:
         
         selected_naming_rule = self.naming_rule_var.get()
 
-        # Disable buttons and update status to indicate conversion is in progress
+        # Pre-conversion conflict check
+        conflicting_files = []
+        for word_path in word_paths_for_conversion:
+            proposed_pdf_filename = self.converter_logic.get_pdf_filename(word_path, selected_naming_rule)
+            potential_output_path = os.path.join(output_dir, proposed_pdf_filename)
+            if os.path.exists(potential_output_path):
+                conflicting_files.append(proposed_pdf_filename)
+        
+        if conflicting_files:
+            conflict_message = (
+                "The following PDF files already exist in the output directory:\n\n"
+                + "\n".join(conflicting_files[:10]) # Show first 10, if many
+                + ("\n..." if len(conflicting_files) > 10 else "")
+                + "\n\nContinuing the conversion will result in these existing files being automatically renamed (e.g., 'File (1).pdf').\n"
+                "Are you sure you want to continue?"
+            )
+            if not messagebox.askyesno("Output File Conflict Detected", conflict_message):
+                self.log_status("User cancelled conversion due to detected file conflicts.", "orange")
+                return # Stop conversion
+
         self.convert_btn.config(state=tk.DISABLED, text="Converting in progress...", bg="lightgray")
         self.stop_btn.config(state=tk.NORMAL)
         self.add_files_btn.config(state=tk.DISABLED)
@@ -346,7 +356,6 @@ class WordToPdfConverterApp:
         self.stop_btn.config(state=tk.DISABLED)
         self.batch_converter.stop_conversion()
 
-        # Re-enable GUI elements immediately after signaling stop
         self.convert_btn.config(state=tk.NORMAL, text="Start Batch Conversion", bg="lightblue")
         self.add_files_btn.config(state=tk.NORMAL)
         self.clear_list_btn.config(state=tk.NORMAL)
@@ -412,15 +421,12 @@ class WordToPdfConverterApp:
         else:
             self.word_treeview.config(selectmode="none")
 
-    # NEW: Method to show border on drag enter
     def _on_dnd_enter(self, event):
         event.widget.config(bd=2, relief="groove")
 
-    # NEW: Method to hide border on drag leave
     def _on_dnd_leave(self, event):
         event.widget.config(bd=0, relief="flat")
 
-    # NEW: Method to reset border after drop (called from drop handlers)
     def _reset_dnd_frame_style(self, widget):
         widget.config(bd=0, relief="flat")
 
@@ -431,7 +437,7 @@ class WordToPdfConverterApp:
         """
         summary_window = tk.Toplevel(self.master)
         summary_window.title("Conversion Summary")
-        summary_window.geometry("800x400")
+        summary_window.geometry("700x400")
         summary_window.transient(self.master)
 
         summary_window.lift()
@@ -444,27 +450,66 @@ class WordToPdfConverterApp:
         self.convert_btn.config(state=tk.DISABLED)
         self.stop_btn.config(state=tk.DISABLED)
 
-        summary_window.grid_rowconfigure(0, weight=1)
+        summary_window.grid_rowconfigure(0, weight=0)
+        summary_window.grid_rowconfigure(1, weight=1)
         summary_window.grid_columnconfigure(0, weight=1)
 
+        # Calculate counts and prepare lists for sorting
+        success_count = 0
+        failed_count = 0
+        renamed_count = 0
+        
+        failed_items = []
+        renamed_items = []
+        success_items = []
+
+        for item in results:
+            status = item.get("status", "Unknown")
+            renamed = item.get("renamed_due_to_collision", False)
+
+            if status == "Failed":
+                failed_count += 1
+                failed_items.append(item)
+            elif renamed:
+                renamed_count += 1
+                # Modify status for display in summary
+                item["status"] = "Conflict Renamed" 
+                renamed_items.append(item)
+            else: # Success and not renamed
+                success_count += 1
+                success_items.append(item)
+
+        # Display counts at the top
+        summary_counts_frame = tk.Frame(summary_window)
+        summary_counts_frame.grid(row=0, column=0, padx=10, pady=5, sticky="ew")
+        summary_counts_frame.grid_columnconfigure(0, weight=1)
+        summary_counts_frame.grid_columnconfigure(1, weight=1)
+        summary_counts_frame.grid_columnconfigure(2, weight=1)
+
+        tk.Label(summary_counts_frame, text=f"Total Files: {len(results)}", font=("Arial", 10, "bold")).grid(row=0, column=0, sticky="w")
+        tk.Label(summary_counts_frame, text=f"Success: {success_count}", fg="#008000", font=("Arial", 10, "bold")).grid(row=0, column=1, sticky="w")
+        tk.Label(summary_counts_frame, text=f"Failed: {failed_count}", fg="#FF0000", font=("Arial", 10, "bold")).grid(row=0, column=2, sticky="w")
+        tk.Label(summary_counts_frame, text=f"Conflict Renamed: {renamed_count}", fg="#FF8C00", font=("Arial", 10, "bold")).grid(row=1, column=0, columnspan=3, sticky="w") # Updated orange color
+
+
         tree_frame = tk.Frame(summary_window)
-        tree_frame.grid(row=0, column=0, padx=10, pady=10, sticky="nsew")
+        tree_frame.grid(row=1, column=0, padx=10, pady=10, sticky="nsew")
         tree_frame.grid_rowconfigure(0, weight=1)
         tree_frame.grid_columnconfigure(0, weight=1)
 
+        # Removed "message" column and set selectmode to "none"
         summary_tree = ttk.Treeview(tree_frame,
-                                    columns=("original_file", "converted_pdf", "status", "message"),
-                                    show="headings")
+                                    columns=("original_file", "converted_pdf", "status"),
+                                    show="headings",
+                                    selectmode="none") # Disabled selection
 
         summary_tree.heading("original_file", text="Original File", anchor="w")
         summary_tree.heading("converted_pdf", text="Converted PDF", anchor="w")
         summary_tree.heading("status", text="Status", anchor="center")
-        summary_tree.heading("message", text="Message", anchor="w")
 
-        summary_tree.column("original_file", width=200, minwidth=150, stretch=True)
-        summary_tree.column("converted_pdf", width=200, minwidth=150, stretch=True)
-        summary_tree.column("status", width=80, minwidth=60, stretch=False)
-        summary_tree.column("message", width=250, minwidth=100, stretch=True)
+        summary_tree.column("original_file", width=250, minwidth=150, stretch=True)
+        summary_tree.column("converted_pdf", width=250, minwidth=150, stretch=True)
+        summary_tree.column("status", width=120, minwidth=80, stretch=False)
 
         summary_tree.grid(row=0, column=0, sticky="nsew")
 
@@ -476,29 +521,23 @@ class WordToPdfConverterApp:
         hsb.grid(row=1, column=0, sticky="ew")
         summary_tree.configure(xscrollcommand=hsb.set)
 
-        for item in results:
-            original_file = item.get("original_filename", "N/A")
-            converted_pdf = item.get("output_filename", "N/A")
-            status = item.get("status", "Unknown")
-            message = item.get("message", "")
-            renamed = item.get("renamed_due_to_collision", False)
+        # Configure tags for colored logging with hex codes, updated orange
+        summary_tree.tag_configure("green", foreground="#008000")
+        summary_tree.tag_configure("red", foreground="#FF0000")
+        summary_tree.tag_configure("orange", foreground="#FF8C00") # Darker Orange (DarkOrange)
 
-            if renamed:
-                tag = "blue"
-            elif status == "Success":
-                tag = "green"
-            elif status == "Failed":
-                tag = "red"
-            else:
-                tag = ""
-            summary_tree.insert("", "end", values=(original_file, converted_pdf, status, message), tags=(tag,))
+        # Insert items in sorted order: Failed, Renamed, Success
+        for item in failed_items:
+            summary_tree.insert("", "end", values=(item.get("original_filename", "N/A"), item.get("output_filename", "N/A"), item.get("status", "Unknown")), tags=("red",))
         
-        summary_tree.tag_configure("green", foreground="green")
-        summary_tree.tag_configure("red", foreground="red")
-        summary_tree.tag_configure("blue", foreground="blue")
+        for item in renamed_items:
+            summary_tree.insert("", "end", values=(item.get("original_filename", "N/A"), item.get("output_filename", "N/A"), item.get("status", "Unknown")), tags=("orange",))
 
+        for item in success_items:
+            summary_tree.insert("", "end", values=(item.get("original_filename", "N/A"), item.get("output_filename", "N/A"), item.get("status", "Unknown")), tags=("green",))
+        
         close_button = tk.Button(summary_window, text="Close", command=lambda: self.on_summary_window_close(summary_window))
-        close_button.grid(row=1, column=0, pady=10)
+        close_button.grid(row=2, column=0, pady=10)
 
     def on_summary_window_close(self, summary_window):
         self.summary_window_open = False
