@@ -43,7 +43,7 @@ jobs:
 
     - name: Run PyInstaller
       run: |
-        pyinstaller --clean main_app_gui.spec
+        pyinstaller --clean main.spec
 
     - name: List dist directory content (for debugging)
       run: dir dist
