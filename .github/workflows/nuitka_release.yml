@@ -1,0 +1,72 @@
+name: Build and Release Windows Executable (Manual Trigger - Nuitka)
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release Tag (e.g., v1.0.0)'
+        required: true
+        type: string
+      release_name:
+        description: 'Release Name (e.g., My DOCX to PDF Converter v1.0.0)'
+        required: true
+        type: string
+      prerelease:
+        description: 'Mark as pre-release?'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+
+    permissions:
+      contents: write
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        ref: 'main'
+
+    - name: Set up Python 3.11 (64-bit)
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        architecture: 'x64'
+
+    - name: Install Nuitka and project dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install nuitka
+      shell: pwsh
+
+    - name: Run Nuitka compilation
+      run: |
+        nuitka --standalone --onefile --output-dir=build --assume-yes-for-downloads --lto=yes --mingw64 --enable-plugin=tk-inter --windows-disable-console main.py
+      shell: pwsh
+
+    - name: List build directory content (for debugging)
+      run: dir build
+      shell: pwsh
+
+    - name: Create Release
+      id: create_release
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: ${{ github.event.inputs.tag }}
+        name: ${{ github.event.inputs.release_name }}
+        body: |
+          # Release Notes for ${{ github.event.inputs.release_name }}
+
+          This release was manually triggered and built from the latest commit on the `main` branch.
+
+          **Instructions:**
+          1. Download the executable from the assets below.
+          2. Run the executable on a Windows machine with Microsoft Word installed.
+          3. For more details, see the commit history for the associated tag.
+        prerelease: ${{ github.event.inputs.prerelease }}
+        files: |
+          build/main.exe
